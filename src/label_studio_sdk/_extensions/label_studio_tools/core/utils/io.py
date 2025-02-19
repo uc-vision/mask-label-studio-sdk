@@ -98,7 +98,6 @@ def get_local_path(
             f"Invalid hostname in LABEL_STUDIO_URL: {hostname}. "
             "Please provide full URL starting with protocol (http:// or https://)."
         )
-    print(f'attempting to download uri: {url}')
     # fix file upload url
     if url.startswith("upload") or url.startswith("/upload"):
         url = "/data" + ("" if url.startswith("/") else "/") + url
@@ -198,6 +197,9 @@ def download_and_cache(
     # File specified by remote URL - download and cache it
     cache_dir = cache_dir or get_cache_dir()
     parsed_url = urlparse(url)
+    
+    if url.startswith('http://localhost') and (non_local_uri := os.environ.get('LOCALHOST_URI')) is not None:
+        url = "".replace('http://localhost', non_local_uri)
 
     # local storage: /data/local-files?d=dir/1.jpg => 1.jpg
     if is_local_storage_file:
