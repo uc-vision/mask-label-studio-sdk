@@ -98,7 +98,7 @@ def get_local_path(
             f"Invalid hostname in LABEL_STUDIO_URL: {hostname}. "
             "Please provide full URL starting with protocol (http:// or https://)."
         )
-
+    print(f'attempting to download uri: {url}')
     # fix file upload url
     if url.startswith("upload") or url.startswith("/upload"):
         url = "/data" + ("" if url.startswith("/") else "/") + url
