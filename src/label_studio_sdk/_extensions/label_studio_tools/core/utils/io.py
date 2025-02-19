@@ -198,8 +198,8 @@ def download_and_cache(
     cache_dir = cache_dir or get_cache_dir()
     parsed_url = urlparse(url)
     
-    if url.startswith('http://localhost') and (non_local_uri := os.environ.get('LOCALHOST_URI')) is not None:
-        url = "".replace('http://localhost', non_local_uri)
+    if 'http://localhost' in url and (non_local_uri := os.environ.get('LOCALHOST_URI')) is not None:
+        url = url.replace('http://localhost', non_local_uri)
 
     # local storage: /data/local-files?d=dir/1.jpg => 1.jpg
     if is_local_storage_file:
