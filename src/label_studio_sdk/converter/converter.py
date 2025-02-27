@@ -1259,6 +1259,26 @@ class Converter(object):
 
         return label_x, label_y, label_w, label_h
 
+    @staticmethod
+    def coordinates(rle=None, points=None, rectangle=None, shape=None):
+        """ Return a list of coordinates for any of the given data types. If none are valid return None """
+        mask = None
+        if rle:
+            mask = brush.mask_from_rle(rle, shape)
+        elif points:
+            mask = brush.mask_from_contour(points, shape)
+        elif rectangle:
+            mask = brush.mask_from_contour(
+                [
+                    (rectangle[0], rectangle[1] + rectangle[3]),
+                    (rectangle[0] + rectangle[2], rectangle[1] + rectangle[3]),
+                    (rectangle[0] + rectangle[2], rectangle[1]),
+                    (rectangle[0], rectangle[1])
+                ],
+                shape
+            )
+        return brush.decode_coordinates_from_mask(mask)
+
     def convert_to_voc(
         self, input_data, output_dir, output_image_dir=None, is_dir=True
     ):
