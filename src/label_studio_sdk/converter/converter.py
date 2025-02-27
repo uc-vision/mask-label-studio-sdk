@@ -59,6 +59,7 @@ class Format(Enum):
     YOLO_WITH_IMAGES = 14
     COCO_WITH_IMAGES = 15
     YOLO_OBB_WITH_IMAGES = 16
+    MASKED_IMAGES = 20
 
     def __str__(self):
         return self.name
@@ -148,6 +149,13 @@ class Converter(object):
             "description": "YOLOv8 OBB format with images downloaded.",
             "link": "https://labelstud.io/guide/export.html#YOLO",
             "tags": ["image segmentation", "object detection"],
+        },
+        Format.MASKED_IMAGES: {
+            'title': 'Masked Images',
+            'description': 'Each image has a corresponding txt file of a mask segmentation format.'
+                           'Format can be used alongside YOLO training when using the maskutils module.',
+            'link': '',
+            'tags': ['image segmentation', 'object detection'],
         },
         Format.BRUSH_TO_NUMPY: {
             "title": "Brush labels to NumPy",
@@ -259,6 +267,12 @@ class Converter(object):
                 output_label_dir=label_dir,
                 is_dir=is_dir,
                 is_obb=(format in [Format.YOLO_OBB, Format.YOLO_OBB_WITH_IMAGES]),
+            )
+        elif format == Format.MASKED_IMAGES:
+            self.convert_to_masked_images(
+                input_data,
+                output_data,
+                is_dir=is_dir,
             )
         elif format == Format.VOC:
             image_dir = kwargs.get("image_dir")
@@ -988,6 +1002,195 @@ class Converter(object):
                         "year": datetime.now().year,
                         "version": "1.0",
                         "contributor": "Label Studio",
+                    },
+                },
+                fout,
+                indent=2,
+            )
+    def convert_to_masked_images(
+        self,
+        input_data,
+        output_dir,
+        is_dir=True
+    ):
+        """Convert data in a specific format to the Msked Images format.
+
+        Parameters
+        ----------
+        input_data : str
+            The input data, either a directory or a JSON file.
+        output_dir : str
+            The directory to store the output files in.
+        output_image_dir : str, optional
+            The directory to store the image files in. If not provided, it will default to a subdirectory called 'images' in output_dir.
+        output_label_dir : str, optional
+            The directory to store the label files in. If not provided, it will default to a subdirectory called 'labels' in output_dir.
+        is_dir : bool, optional
+            A boolean indicating whether `input_data` is a directory (True) or a JSON file (False).
+        """
+        self._check_format(Format.MASKED_IMAGES)
+        ensure_dir(output_dir)
+        notes_file = os.path.join(output_dir, 'notes.json')
+        class_file = os.path.join(output_dir, 'classes.txt')
+
+        output_image_dir = os.path.join(output_dir, 'images')  # output image directory.
+        os.makedirs(output_image_dir, exist_ok=True)
+
+        output_label_dir = os.path.join(output_dir, 'labels')  # output label directory.
+        os.makedirs(output_label_dir, exist_ok=True)
+
+        categories, category_name_to_id = self._get_labels()
+        data_key = self._data_keys[0]
+
+        item_iterator = (
+            self.iter_from_dir(input_data)
+            if is_dir
+            else self.iter_from_json_file(input_data)
+        )
+
+        for item_idx, item in enumerate(item_iterator):
+            # get image path and label file path
+            image_path = item['input'][data_key]
+            # download image
+            if not os.path.exists(image_path):
+                try:
+                    image_path = download(
+                        image_path,
+                        output_image_dir,
+                        project_dir=self.project_dir,
+                        return_relative_path=True,
+                        upload_dir=self.upload_dir,
+                        download_resources=self.download_resources,
+                    )
+                except:
+                    logger.info(
+                        'Unable to download {image_path}. The item {item} will be skipped'.format(
+                            image_path=image_path, item=item
+                        ),
+                        exc_info=True,
+                    )
+
+            # identify label file path
+            filename = os.path.splitext(os.path.basename(image_path))[0]
+            filename = filename[
+                       0: 255 - 4
+                       ]  # urls might be too long, use 255 bytes (-4 for .txt) limit for filenames
+            label_path = os.path.join(
+                output_label_dir, filename + '.txt'
+            )
+
+            # Skip tasks without annotations
+            if not item['output']:
+                logger.warning('No completions found for item #' + str(item_idx))
+
+            # concatenate results over all tag names
+            labels = []
+            for key in item['output']:
+                labels += item['output'][key]
+
+            if len(labels) == 0:
+                logger.warning(f'Empty bboxes for {item["output"]}')
+
+            annotation_id = item['annotation_id']
+            task_id = item['id']
+            with Image.open(output_dir + '/' + image_path) as img:
+                annotation_shape = (img.height, img.width)  # Get shape.e
+            annotations = []
+            instance_id = 0
+
+            for label in labels:
+                # Get task names.
+                label_shape = (label['original_height'], label['original_width'])
+                if annotation_shape != label_shape:
+                    logger.warning(f'Shape of masks do not match. {annotation_shape} != {label_shape}')
+
+                category_names = []  # considering multi-label
+                for key in ['rectanglelabels', 'polygonlabels', 'labels', 'brushlabels']:
+                    if key in label and len(label[key]) > 0:
+                        # change to save multi-label
+                        for category_name in label[key]:
+                            category_names.append(category_name)
+
+                if len(category_names) == 0:
+                    logger.debug(
+                        "Unknown label type or labels are empty: " + str(label)
+                    )
+                    continue
+                for category_name in category_names:
+                    if category_name not in category_name_to_id:
+                        category_id = len(categories)
+                        category_name_to_id[category_name] = category_id
+                        categories.append({'id': category_id, 'name': category_name})
+                    category_id = category_name_to_id[category_name]
+
+                    coordinates = None  # list of coordinate for the mask.
+                    # Category id is classification.
+                    if (
+                        ('brushlabels' in label or
+                         'labels' in label) and
+                        'rle' in label
+                    ):
+                        # Get coordinates from rle data.
+                        coordinates = Converter.coordinates(rle=label['rle'], shape=label_shape)
+                    elif (
+                        "rectanglelabels" in label
+                        or 'rectangle' in label
+                        or 'labels' in label
+                    ):
+                        xywh = self.rotated_rectangle(label)
+                        if xywh is None:
+                            continue
+                        x, y, w, h = xywh
+                        rectangle = (
+                            (x + w / 2) / 100,
+                            (y + h / 2) / 100,
+                            w / 100,
+                            h / 100
+                        )
+                        coordinates = Converter.coordinates(rectangle=rectangle, shape=label_shape)
+                    elif "polygonlabels" in label or 'polygon' in label:
+                        points = [(x / 100, y / 100) for x, y in label["points"]]
+                        coordinates = Converter.coordinates(points=points, shape=label_shape)
+
+                    if coordinates is None:
+                        # Error no coordinates are created.
+                        raise ValueError(f"Unknown label type {label}")
+
+
+                    # Add instance
+                    annotations.append(
+                        [task_id, instance_id, category_id] + [point for coord in coordinates for point in coord]
+                    )
+                    instance_id += 1  # Increment id.
+
+            # Create header for mask file.
+            annotation_header = [
+                annotation_id,  # id
+                annotation_shape[1],  # width
+                annotation_shape[0],  # height
+                len(categories),
+                *[cat for category in categories for cat in (category['id'], category['name'])]
+            ]
+            with open(label_path, 'w') as f:
+                # Saving the annotation file.
+                f.write(" ".join([str(v) for v in annotation_header]) + "\n")
+                for index, annotation in enumerate(annotations):
+                    line = " ".join(str(v) for v in annotation)
+                    if index == len(annotation) - 1:
+                        f.write(line)
+                    else:
+                        f.write(line + "\n")
+        with open(class_file, 'w', encoding='utf8') as f:
+            for c in categories:
+                f.write(c['name'] + '\n')
+        with io.open(notes_file, mode='w', encoding='utf8') as fout:
+            json.dump(
+                {
+                    'categories': categories,
+                    'info': {
+                        'year': datetime.now().year,
+                        'version': '1.0',
+                        'contributor': 'Label Studio',
                     },
                 },
                 fout,
