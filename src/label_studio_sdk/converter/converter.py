@@ -10,12 +10,20 @@ from copy import deepcopy
 from datetime import datetime
 from enum import Enum
 from glob import glob
-from shutil import copy2
+from shutil import copy2, rmtree
 from typing import Optional
 
 import ijson
 import ujson as json
 from PIL import Image
+from pathlib import Path
+
+from mask_utilities.classes.datasets import Dataset
+from mask_utilities.classes.datasets.data import (UniqueDataCategories, DataCategory, DataAnnotation, DataImage, DataImagePath,
+                                                   DataInstance, PolygonMask, LabelStudioMask, RectangleMask, RLEMask)
+from mask_utilities.classes.loaders import (Detectron2DatasetLoader, CocoDatasetLoader, CacheDatasetLoader, DatasetLoader)
+
+
 from label_studio_sdk.converter import brush
 from label_studio_sdk.converter.audio import convert_to_asr_json_manifest
 from label_studio_sdk.converter.exports import csv2
@@ -60,6 +68,13 @@ class Format(Enum):
     COCO_WITH_IMAGES = 15
     YOLO_OBB_WITH_IMAGES = 16
     MASKED_IMAGES = 20
+
+    DETECTRON2 = 40
+    DETECTRON2_WITH_IMAGES = 41
+    COCO_MASK = 42
+    COCO_MASK_WITH_IMAGES = 43
+    CACHED_D2 = 44
+    CACHED_D2_WITH_IMAGES = 45
 
     def __str__(self):
         return self.name
@@ -154,6 +169,42 @@ class Converter(object):
             'title': 'Masked Images',
             'description': 'Each image has a corresponding txt file of a mask segmentation format.'
                            'Format can be used alongside YOLO training when using the maskutils module.',
+            'link': '',
+            'tags': ['image segmentation', 'object detection'],
+        },
+        Format.DETECTRON2: {
+            'title': 'Detectron 2',
+            'description': 'Detectron 2 style output.',
+            'link': 'https://detectron2.readthedocs.io/en/latest/tutorials/datasets.html',
+            'tags': ['image segmentation', 'object detection'],
+        },
+        Format.DETECTRON2_WITH_IMAGES: {
+            'title': 'Detectron 2 Images',
+            'description': 'Detectron 2 style output with annotation images.',
+            'link': 'https://detectron2.readthedocs.io/en/latest/tutorials/datasets.html',
+            'tags': ['image segmentation', 'object detection'],
+        },
+        Format.COCO_MASK: {
+            'title': 'Mask COCO',
+            'description': 'Mask COCO instance segmentation output based on msask utilities coco structure.',
+            'link': '',
+            'tags': ['image segmentation', 'object detection'],
+        },        
+        Format.COCO_MASK_WITH_IMAGES: {
+            'title': 'Mask COCO Images',
+            'description': 'Mask COCO instance segmentation output based on msask utilities coco structure with images',
+            'link': '',
+            'tags': ['image segmentation', 'object detection'],
+        },
+        Format.CACHED_D2: {
+            'title': 'Cached Detectron 2',
+            'description': 'Cached Detectron 2 style output.',
+            'link': '',
+            'tags': ['image segmentation', 'object detection'],
+        },
+        Format.CACHED_D2_WITH_IMAGES: {
+            'title': 'Cached Detectron 2 Images',
+            'description': 'Cached Detectron 2 style output with annotation images.',
             'link': '',
             'tags': ['image segmentation', 'object detection'],
         },
@@ -274,6 +325,18 @@ class Converter(object):
                 output_data,
                 is_dir=is_dir,
             )
+        elif format == Format.DETECTRON2:
+            self.convert_to_dataset(input_data, output_data, is_dir, False, Detectron2DatasetLoader)
+        elif format == Format.DETECTRON2_WITH_IMAGES:
+            self.convert_to_dataset(input_data, output_data, is_dir, True, Detectron2DatasetLoader)
+        elif format == Format.COCO_MASK:
+            self.convert_to_dataset(input_data, output_data, is_dir, False, CocoDatasetLoader)
+        elif format == Format.COCO_MASK_WITH_IMAGES:
+            self.convert_to_dataset(input_data, output_data, is_dir, True, CocoDatasetLoader)
+        elif format == Format.CACHED_D2:
+            self.convert_to_dataset(input_data, output_data, is_dir, False, CacheDatasetLoader)
+        elif format == Format.CACHED_D2_WITH_IMAGES:
+            self.convert_to_dataset(input_data, output_data, is_dir, True, CacheDatasetLoader)
         elif format == Format.VOC:
             image_dir = kwargs.get("image_dir")
             self.convert_to_voc(
@@ -1196,6 +1259,187 @@ class Converter(object):
                 fout,
                 indent=2,
             )
+    def convert_to_dataset(
+        self,
+        input_data,
+        output_dir,
+        is_dir: bool,
+        include_images: bool,
+        loader: DatasetLoader
+    ):
+        """Convert data in a specific format to the Detectron 2 format.
+
+        Parameters
+        ----------
+        input_data : str
+            The input data, either a directory or a JSON file.
+        output_dir : str
+            The directory to store the output files in.
+        output_image_dir : str, optional
+            The directory to store the image files in. If not provided, it will default to a subdirectory called 'images' in output_dir.
+        output_label_dir : str, optional
+            The directory to store the label files in. If not provided, it will default to a subdirectory called 'labels' in output_dir.
+        is_dir : bool, optional
+            A boolean indicating whether `input_data` is a directory (True) or a JSON file (False).
+        include_images : bool, optional
+            A boolean indicating whether to download all images and include them as exported format inside a folder.
+        """
+        ensure_dir(output_dir)
+
+        output_image_dir = os.path.join(output_dir, 'images')  # output image directory.
+        os.makedirs(output_image_dir, exist_ok=True)
+
+
+        categories = UniqueDataCategories(
+            DataCategory(cat['id'], cat['name']) for cat in self._get_labels()[0]
+        )
+
+        data_key = self._data_keys[0]
+
+        item_iterator = (
+            self.iter_from_dir(input_data)
+            if is_dir
+            else self.iter_from_json_file(input_data)
+        )
+        
+        annotations = []
+
+        for item_idx, item in enumerate(item_iterator):
+            # get image path and label file path
+            image_path = item['input'][data_key]
+            # download image
+            if not os.path.exists(image_path):
+                try:
+                    image_path = download(
+                        image_path,
+                        output_image_dir,
+                        project_dir=self.project_dir,
+                        return_relative_path=True,
+                        upload_dir=self.upload_dir,
+                        download_resources=self.download_resources,
+                    )
+                except:
+                    logger.info(
+                        'Unable to download {image_path}. The item {item} will be skipped'.format(
+                            image_path=image_path, item=item
+                        ),
+                        exc_info=True,
+                    )
+            # Skip tasks without annotations
+            if not item['output']:
+                logger.warning('No completions found for item #' + str(item_idx))
+
+            # concatenate results over all tag names
+            labels = []
+            for key in item['output']:
+                labels += item['output'][key]
+
+            if len(labels) == 0:
+                logger.warning(f'Empty bboxes for {item["output"]}')
+
+            annotation_id = item['annotation_id']
+            # task_id = item['id']
+
+            img_path = output_dir + '/' + image_path
+            with Image.open(img_path) as img:
+                annotation_shape = (img.height, img.width)  # Get shape.e
+            
+
+            image = DataImage(item_idx, annotation_shape[1], annotation_shape[0], Path(img_path if include_images else item['input'][data_key]))
+
+            instances = []
+            instance_id = 0
+
+            for label in labels:
+                # Get task names.
+                label_shape = (label['original_height'], label['original_width'])
+                if annotation_shape != label_shape:
+                    logger.warning(f'Shape of masks do not match. {annotation_shape} != {label_shape}')
+
+                category_names = []  # considering multi-label
+                for key in ['rectanglelabels', 'polygonlabels', 'labels', 'brushlabels']:
+                    if key in label and len(label[key]) > 0:
+                        # change to save multi-label
+                        for category_name in label[key]:
+                            category_names.append(category_name)
+
+                if len(category_names) == 0:
+                    logger.debug(
+                        "Unknown label type or labels are empty: " + str(label)
+                    )
+                    continue
+                for category_name in category_names:
+
+                    data_mask = None  # RLE coords.
+                    # Category id is classification.
+                    if (
+                        ('brushlabels' in label or
+                         'labels' in label) and
+                        'rle' in label
+                    ):
+                        data_mask = LabelStudioMask(brush.decode_rle(label['rle']), label_shape)
+                    elif (
+                        "rectanglelabels" in label
+                        or 'rectangle' in label
+                        or 'labels' in label
+                    ):
+                        xywh = self.rotated_rectangle(label)
+                        if xywh is None:
+                            continue
+                        x, y, w, h = xywh
+                        rectangle = (
+                            (x + w / 2) / 100,
+                            (y + h / 2) / 100,
+                            w / 100,
+                            h / 100
+                        )
+                        data_mask = RectangleMask(rectangle, label_shape)
+                    elif "polygonlabels" in label or 'polygon' in label:
+                        points = [(x / 100, y / 100) for x, y in label["points"]]
+                        data_mask = PolygonMask(points, label_shape)
+
+                    if data_mask is None:
+                        # Error no coordinates are created.
+                        raise ValueError(f"Unknown label type {label}")
+
+                    # Add instance
+                    
+                    instances.append(
+                        DataInstance(
+                            instance_id,
+                            categories.get(category_name),
+                            mask=data_mask.to(RLEMask)  # Convert to real RLE to save memory when exporting.
+                        )
+                    )
+
+                    instance_id += 1  # Increment id.
+            
+            annotations.append(
+                DataAnnotation(
+                    annotation_id,
+                    image,
+                    instances
+                )
+            )
+        
+        if not include_images:
+            rmtree(output_image_dir)
+
+        output_dir_path = Path(output_dir)
+        ds_name = 'label-studio-export'
+        dataset = Dataset(
+            ds_name,
+            output_dir_path,
+            annotations,
+            categories
+        )
+        with io.open(output_dir_path / (ds_name + '.json'), mode='w', encoding='utf8') as fout:
+            json.dump(
+                loader.convert_from_dataset(dataset, image_path_mode=DataImagePath.RELATIVE),
+                fout,
+                indent=2,
+            )
+
 
     @staticmethod
     def rotated_rectangle(label):

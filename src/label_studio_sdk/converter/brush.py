@@ -37,6 +37,7 @@ from PIL import Image, ImageDraw
 
 from collections import defaultdict
 from itertools import groupby
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
