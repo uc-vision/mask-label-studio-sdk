@@ -142,6 +142,7 @@ def download(
     return_relative_path=False,
     upload_dir=None,
     download_resources=True,
+    file_extension_if_none='.jpeg'
 ):
     is_local_file = url.startswith("/data/") and "?d=" in url
     is_uploaded_file = url.startswith("/data/upload")
@@ -175,7 +176,7 @@ def download(
 
     if filename is None:
         basename, ext = os.path.splitext(os.path.basename(urlparse(url).path))
-        filename = f"{basename}{ext}"
+        filename = f"{basename}{ext if ext != '' else file_extension_if_none}"
         filepath = os.path.join(output_dir, filename)
         if os.path.exists(filepath):
             filename = (
