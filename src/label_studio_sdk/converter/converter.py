@@ -1289,10 +1289,21 @@ class Converter(object):
         output_image_dir = os.path.join(output_dir, 'images')  # output image directory.
         os.makedirs(output_image_dir, exist_ok=True)
 
-
+        # Parse categories.
         categories = UniqueDataCategories(
             DataCategory(cat['id'], cat['name']) for cat in self._get_labels()[0]
         )
+        # Find colours.
+        tags = {tag["type"]: tag["labels_attrs"] for tag in self._schema.values()}
+        for category in categories:
+            for tag_type in ['BrushLabels', 'KeyPointLabels', 'PolygonLabels', 'RectangleLabels']:
+                tag = tags.get(tag_type)
+                if not tag:
+                    continue
+                hex_colour = tag.get(category.name, {}).get('background')
+                if hex_colour:
+                    category.update_colour(hex_colour.upper())
+                    break
 
         data_key = self._data_keys[0]
 
@@ -1317,6 +1328,7 @@ class Converter(object):
                         return_relative_path=True,
                         upload_dir=self.upload_dir,
                         download_resources=self.download_resources,
+                        file_extension_if_none='.png'
                     )
                 except:
                     logger.info(
@@ -1424,7 +1436,7 @@ class Converter(object):
         
         if not include_images:
             rmtree(output_image_dir)
-
+            
         output_dir_path = Path(output_dir)
         ds_name = 'label-studio-export'
         dataset = Dataset(
@@ -1435,7 +1447,7 @@ class Converter(object):
         )
         with io.open(output_dir_path / (ds_name + '.json'), mode='w', encoding='utf8') as fout:
             json.dump(
-                loader.convert_from_dataset(dataset, image_path_mode=DataImagePath.RELATIVE),
+                loader.convert_from_dataset(dataset, image_path_mode=DataImagePath.RELATIVE, seg_type=str),
                 fout,
                 indent=2,
             )
