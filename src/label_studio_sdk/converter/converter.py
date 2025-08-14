@@ -1343,19 +1343,21 @@ class Converter(object):
             # Sort image paths and image size.
 
             image_path = item['input'][data_key]
-            image_map.put(prefix + image_path, item_idx)
+            image_map.put(image_path, item_idx)
             annotation_shape = None
             
             if not include_images and len(labels) == 0 and not os.path.exists(image_path):
                 # Download image to temp.
                 try:
-                    image_map.download(image_path, output_image_dir, item_idx)
+                    image_map.put(prefix + image_path, item_idx)
+                    image_map.download(image_path, output_image_dir, item_idx, update=True)
                 except:
                     logger.info(f'Unable to download {image_path}. Setting image_size to (0, 0) Please update this.', exc_info=True)
                     annotation_shape = (0, 0)
             
             if include_images:
                 try:
+                    image_map.put(prefix + image_path, item_idx)
                     image_map.download(image_path, Path(output_image_dir), item_idx, update=True)
                 except:
                     logger.info(f'Unable to download {image_path}. The item {item} will be skipped.', exc_info=True)
