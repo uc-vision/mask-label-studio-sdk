@@ -20,7 +20,7 @@ from pathlib import Path
 
 from mask_utilities.classes.datasets import Dataset
 from mask_utilities.classes.datasets.data import (UniqueDataCategories, DataCategory, DataAnnotation, DataImage, DataImagePath,
-                                                   DataInstance, PolygonMask, LabelStudioMask, RectangleMask, RLEMask)
+                                                   DataInstance, PolygonMask, LabelStudioMask, RectangleMask, RLEMask, ImageMap)
 from mask_utilities.classes.loaders import (Detectron2DatasetLoader, CocoDatasetLoader, CacheDatasetLoader, DatasetLoader)
 
 
@@ -1285,13 +1285,14 @@ class Converter(object):
             A boolean indicating whether to download all images and include them as exported format inside a folder.
         """
         ensure_dir(output_dir)
-
-        output_image_dir = os.path.join(output_dir, 'images')  # output image directory.
+        
+        # Create temp output image directory
+        output_image_dir = os.path.join(output_dir, '_tmp_images')  # output image directory.
         os.makedirs(output_image_dir, exist_ok=True)
 
         # Parse categories.
         categories = UniqueDataCategories(
-            DataCategory(cat['id'], cat['name']) for cat in self._get_labels()[0]
+            [DataCategory(cat['id'], cat['name']) for cat in self._get_labels()[0]]
         )
         # Find colours.
         tags = {tag["type"]: tag["labels_attrs"] for tag in self._schema.values()}
@@ -1305,7 +1306,14 @@ class Converter(object):
                     category.update_colour(hex_colour.upper())
                     break
 
-        data_key = self._data_keys[0]
+        data_key: str = self._data_keys[0]
+        if '$' in data_key:
+            # Key has prepand variable.
+            parts = data_key.split('$')
+            data_key = parts[-1]  # Get last part.
+            prefix = '$'.join(parts[:-1])  # Get all but last part.
+        else:
+            prefix = ''
 
         item_iterator = (
             self.iter_from_dir(input_data)
@@ -1313,51 +1321,56 @@ class Converter(object):
             else self.iter_from_json_file(input_data)
         )
         
+        image_map = ImageMap()
         annotations = []
 
         for item_idx, item in enumerate(item_iterator):
-            # get image path and label file path
-            image_path = item['input'][data_key]
-            # download image
-            if not os.path.exists(image_path):
-                try:
-                    image_path = download(
-                        image_path,
-                        output_image_dir,
-                        project_dir=self.project_dir,
-                        return_relative_path=True,
-                        upload_dir=self.upload_dir,
-                        download_resources=self.download_resources,
-                        file_extension_if_none='.png'
-                    )
-                except:
-                    logger.info(
-                        'Unable to download {image_path}. The item {item} will be skipped'.format(
-                            image_path=image_path, item=item
-                        ),
-                        exc_info=True,
-                    )
+
             # Skip tasks without annotations
             if not item['output']:
                 logger.warning('No completions found for item #' + str(item_idx))
 
             # concatenate results over all tag names
             labels = []
-            for key in item['output']:
+            for key in item.get('output', {}):
                 labels += item['output'][key]
 
             if len(labels) == 0:
                 logger.warning(f'Empty bboxes for {item["output"]}')
 
             annotation_id = item['annotation_id']
-            # task_id = item['id']
 
-            img_path = output_dir + '/' + image_path
-            with Image.open(img_path) as img:
-                annotation_shape = (img.height, img.width)  # Get shape.e
+            # Sort image paths and image size.
+
+            image_path = item['input'][data_key]
+            image_map.put(prefix + image_path, item_idx)
+            annotation_shape = None
             
+            if not include_images and len(labels) == 0 and not os.path.exists(image_path):
+                # Download image to temp.
+                try:
+                    image_map.download(image_path, output_image_dir, item_idx)
+                except:
+                    logger.info(f'Unable to download {image_path}. Setting image_size to (0, 0) Please update this.', exc_info=True)
+                    annotation_shape = (0, 0)
+            
+            if include_images:
+                try:
+                    image_map.download(image_path, Path(output_image_dir), item_idx, update=True)
+                except:
+                    logger.info(f'Unable to download {image_path}. The item {item} will be skipped.', exc_info=True)
+                    continue
+            
+            if annotation_shape is None and len(labels) > 0:
+                # Get shape from first label.
+                annotation_shape = (labels[0]['original_height'], labels[0]['original_width'])
+            local_image_path = image_map.get_absolute(image_path, item_idx)
+            if annotation_shape is None and len(labels) == 0:
+                with Image.open(local_image_path) as img:
+                    annotation_shape = (img.height, img.width)  # Get shape.
 
-            image = DataImage(item_idx, annotation_shape[1], annotation_shape[0], Path(img_path if include_images else item['input'][data_key]))
+            # Use original image path if not including images.
+            image = DataImage(item_idx, annotation_shape[1], annotation_shape[0], local_image_path)
 
             instances = []
             instance_id = 0
@@ -1433,9 +1446,6 @@ class Converter(object):
                     instances
                 )
             )
-        
-        if not include_images:
-            rmtree(output_image_dir)
             
         output_dir_path = Path(output_dir)
         ds_name = 'label-studio-export'
@@ -1443,14 +1453,12 @@ class Converter(object):
             ds_name,
             output_dir_path,
             annotations,
-            categories
+            categories,
+            image_map
         )
-        with io.open(output_dir_path / (ds_name + '.json'), mode='w', encoding='utf8') as fout:
-            json.dump(
-                loader.convert_from_dataset(dataset, image_path_mode=DataImagePath.RELATIVE, seg_type=str),
-                fout,
-                indent=2,
-            )
+        # Save dataset.
+        loader.export_dataset(dataset, output_dir_path, export_image=include_images, image_mode='relative')
+        rmtree(output_image_dir)  # Remove temp image directory so its not included.
 
 
     @staticmethod
