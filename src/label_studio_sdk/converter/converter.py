@@ -1343,22 +1343,22 @@ class Converter(object):
             # Sort image paths and image size.
 
             image_path = item['input'][data_key]
-            image_map.put(image_path, item_idx)
+            image_map.put(image_path)
             annotation_shape = None
             
             if not include_images and len(labels) == 0 and not os.path.exists(image_path):
                 # Download image to temp.
                 try:
-                    image_map.put(prefix + image_path, item_idx)
-                    image_map.download(image_path, output_image_dir, item_idx, update=True)
+                    image_map.put(prefix + image_path)
+                    image_map.download(image_path, output_image_dir, update=True)
                 except:
                     logger.info(f'Unable to download {image_path}. Setting image_size to (0, 0) Please update this.', exc_info=True)
                     annotation_shape = (0, 0)
             
             if include_images:
                 try:
-                    image_map.put(prefix + image_path, item_idx)
-                    image_map.download(image_path, Path(output_image_dir), item_idx, update=True)
+                    image_map.put(prefix + image_path)
+                    image_map.download(image_path, Path(output_image_dir), update=True)
                 except:
                     logger.info(f'Unable to download {image_path}. The item {item} will be skipped.', exc_info=True)
                     continue
@@ -1366,7 +1366,7 @@ class Converter(object):
             if annotation_shape is None and len(labels) > 0:
                 # Get shape from first label.
                 annotation_shape = (labels[0]['original_height'], labels[0]['original_width'])
-            local_image_path = image_map.get_absolute(image_path, item_idx)
+            local_image_path = image_map.get_path(image_path)
             if annotation_shape is None and len(labels) == 0:
                 with Image.open(local_image_path) as img:
                     annotation_shape = (img.height, img.width)  # Get shape.
